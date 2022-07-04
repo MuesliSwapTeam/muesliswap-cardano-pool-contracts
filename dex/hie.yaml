@@ -1,8 +1,0 @@
-cradle:
-  cabal:
-    - path: "./src"
-      component: "lib:minswap-core"
-    - path: "./test"
-      component: "test:minswap-tests"
-    - path: "./audit"
-      component: "test:tweag-audit"

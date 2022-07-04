@@ -3,3 +3,5 @@ print-plc
 bin
 cabal.project.local
 printed
+keys/*.skey
+keys/pool-staking.vkey
