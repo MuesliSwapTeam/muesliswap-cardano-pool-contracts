@@ -18,64 +18,48 @@ module MuesliSwapPools.ConstantProductPoolNFT.OnChain
 where
 
 import Data.Maybe (fromJust)
-import Ledger
-  ( CurrencySymbol,
-    MintingPolicy,
-    Script,
-    TokenName,
-    TxId (getTxId),
-    TxOutRef (TxOutRef),
-    scriptCurrencySymbol,
-    unMintingPolicyScript,
-  )
-import qualified MuesliSwapPools.Spooky.TypedSpookyContexts as SC
-import MuesliSwapPools.Types.Coin (assetClass, isUnity)
+import MuesliSwapPools.Types.Coin (isUnity)
 import MuesliSwapPools.Utils.OnChainUtils (integerToBS)
-import qualified Plutonomy
-import Plutus.V1.Ledger.Value (TokenName (TokenName), tokenName)
+import qualified Plutus.Script.Utils.V2.Scripts as Scripts
+import qualified Plutus.V2.Ledger.Api as V2
+import Plutus.V2.Ledger.Contexts (TxOutRef (TxOutRef))
+import Plutus.V2.Ledger.Contexts (ownCurrencySymbol, spendsOutput)
 import qualified PlutusTx
 import PlutusTx.Prelude
 import Text.Hex (decodeHex)
 
 {-# INLINEABLE mkNFTPolicy #-}
-mkNFTPolicy :: MintingPolicy
-mkNFTPolicy = Plutonomy.optimizeUPLC $ Plutonomy.mintingPolicyToPlutus originalNFTPolicy
+mkNFTPolicy :: Scripts.MintingPolicy
+mkNFTPolicy = V2.mkMintingPolicyScript $$(PlutusTx.compile [|| wrap ||])
+  where
+    wrap = Scripts.mkUntypedMintingPolicy validateMintNFT
 
 {-# INLINEABLE mkNFTScript #-}
-mkNFTScript :: Script
-mkNFTScript = unMintingPolicyScript mkNFTPolicy
-
-originalNFTPolicy :: Plutonomy.MintingPolicy
-originalNFTPolicy =
-  Plutonomy.mkMintingPolicyScript
-    $$(PlutusTx.compile [||validateMintNFT||])
+mkNFTScript :: V2.Script
+mkNFTScript = V2.unMintingPolicyScript mkNFTPolicy
 
 {-# INLINEABLE mkNFTSymbol #-}
-mkNFTSymbol :: CurrencySymbol
-mkNFTSymbol = scriptCurrencySymbol mkNFTPolicy
+mkNFTSymbol :: V2.CurrencySymbol
+mkNFTSymbol = Scripts.scriptCurrencySymbol mkNFTPolicy
 
 {-# INLINEABLE mkNFTTokenName #-}
-mkNFTTokenName :: TxOutRef -> TokenName
+mkNFTTokenName :: TxOutRef -> V2.TokenName
 mkNFTTokenName (TxOutRef refHash refIdx) = tokenName
   where
-    tokenName :: TokenName
-    tokenName = TokenName $ sha2_256 $ getTxId refHash <> integerToBS refIdx
+    tokenName :: V2.TokenName
+    tokenName = V2.TokenName $ sha2_256 $ V2.getTxId refHash <> integerToBS refIdx
 
 -- | The 'validateMintNFT' function validates the NFT token is minted correctly
 --
 -- 1.   Validate that UTxO has TxHash & TxIndex above (*) has been spent in this transaction
 -- 2.   Validate that NFT has correct TokenName (sha256 of TxHash + TxIndex (*))
 {-# INLINEABLE validateMintNFT #-}
-validateMintNFT :: BuiltinData -> BuiltinData -> ()
-validateMintNFT rawRedeemer rawContext =
-  let ref@(TxOutRef refHash refIdx) = PlutusTx.unsafeFromBuiltinData @TxOutRef rawRedeemer
-      context = PlutusTx.unsafeFromBuiltinData rawContext
-      info = SC.scriptContextTxInfo context
-      ownSymbol = SC.ownCurrencySymbol context
-      mintValue = SC.txInfoMint info
-   in if (SC.spendsOutput info refHash refIdx) -- 1.
-        then
-          if (isUnity mintValue (assetClass ownSymbol (mkNFTTokenName ref))) -- 2.
-            then ()
-            else error ()
-        else error ()
+validateMintNFT :: TxOutRef -> V2.ScriptContext -> Bool
+validateMintNFT ref@(TxOutRef refHash refIdx) context =
+  let --ref@(TxOutRef refHash refIdx) = PlutusTx.unsafeFromBuiltinData @TxOutRef rawRedeemer
+      --context = PlutusTx.unsafeFromBuiltinData rawContext
+      info = V2.scriptContextTxInfo context
+      ownSymbol = ownCurrencySymbol context
+      mintValue = V2.txInfoMint info
+   in spendsOutput info refHash refIdx -- 1.
+    && isUnity mintValue (ownSymbol, mkNFTTokenName ref) -- 2.

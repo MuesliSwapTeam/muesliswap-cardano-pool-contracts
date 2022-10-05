@@ -1,80 +1,64 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# OPTIONS_GHC -fno-specialise #-}
+{-# OPTIONS_GHC -fno-worker-wrapper #-}
 
 module MuesliSwapPools.BatchOrder.OnChain (mkBatchOrderScript) where
 
-import Ledger (Script, Validator, ValidatorHash (..), unValidatorScript, validatorHash)
-import MuesliSwapPools.BatchOrder.Types (POrderDatum, POrderRedeemer (..))
+import qualified Plutus.Script.Utils.V2.Scripts as Scripts
+import MuesliSwapPools.BatchOrder.Types (OrderDatum(..), OrderRedeemer(..))
 import MuesliSwapPools.ConstantProductPool.OnChain (mkPoolScript)
-import qualified MuesliSwapPools.Plutarch.Ledger as PLedger
-import MuesliSwapPools.Plutarch.Utils (psingleMatch)
-import MuesliSwapPools.Plutarch.Utils.Cont (pmatchC, ptraceC)
-import Plutarch (compile)
-import Plutarch.Api.V1 (PAddress, PPubKeyHash (PPubKeyHash), PScriptContext)
-import Plutarch.Prelude
-import qualified Plutonomy
-import Plutus.V1.Ledger.Api (fromBuiltin)
-import Plutus.V1.Ledger.Scripts (Validator (..))
+import Plutus.V2.Ledger.Api as V2
+import Plutus.V2.Ledger.Contexts (txSignedBy)
+import Plutus.V1.Ledger.Address (toValidatorHash)
+import qualified PlutusTx
+import PlutusTx.Prelude
 
-poolScriptHash :: Term s PByteString
-poolScriptHash =
-  let (Ledger.ValidatorHash vh) = validatorHash $ Validator $ mkPoolScript
-   in pconstant . fromBuiltin $ vh
 
-batchOrderScript :: Script
-batchOrderScript = compile $ batchOrderValidator # poolScriptHash
+mkBatchOrderScript :: V2.Script
+mkBatchOrderScript = V2.unValidatorScript batcherScript
 
-mkBatchOrderPlutonomyValidator :: Validator
-mkBatchOrderPlutonomyValidator = Validator batchOrderScript
+batcherScript :: V2.Validator
+batcherScript = V2.mkValidatorScript $
+  $$(PlutusTx.compile [|| wrap ||])
+    `PlutusTx.applyCode` PlutusTx.liftCode poolValHash
+    where
+      wrap = Scripts.mkUntypedValidator . mkBatchOrderValidator
 
-mkBatchOrderScript :: Script
-mkBatchOrderScript = unValidatorScript $ Plutonomy.optimizeUPLC mkBatchOrderPlutonomyValidator
+      poolValHash :: V2.ValidatorHash
+      !poolValHash = Scripts.validatorHash $ V2.Validator mkPoolScript
 
-batchOrderValidator ::
-  forall s.
-  Term
-    s
-    ( PByteString
-        :--> POrderDatum
-        :--> POrderRedeemer
-        :--> PScriptContext
-        :--> PUnit
-    )
-batchOrderValidator = plam $ \ph pdatm predm pctx -> unTermCont $ do
-  -- Extract the txInfo field and bind the necessary fields to it - inputs and signatories.
-  info <- tcont . pletFields @'["inputs", "signatories"] . pfromData $ pfield @"txInfo" # pctx
-  redm <- pmatchC predm
-  case redm of
-    PApplyOrder _ -> do
-      ptraceC "ApplyOrder case"
-      let txInputs = pfromData $ hrecField @"inputs" info
+{-# INLINEABLE mkBatchOrderValidator #-}
+mkBatchOrderValidator :: V2.ValidatorHash -> OrderDatum -> OrderRedeemer -> V2.ScriptContext -> Bool
+mkBatchOrderValidator poolScriptHash datum redeemer ctx = case redeemer of
+    ApplyOrder -> hasOnePoolInput
+    CancelOrder -> validSig
+  where
+    --datum = PlutusTx.unsafeFromBuiltinData @OrderDatum rawDatum
+    --redeemer = PlutusTx.unsafeFromBuiltinData @OrderRedeemer rawRedeemer
+    --ctx = PlutusTx.unsafeFromBuiltinData @ScriptContext rawContext
 
-          isPoolAddress :: Term s (PAddress :--> PBool)
-          isPoolAddress = plam $ \addr ->
-            pmatch (PLedger.toValidatorHash # addr) $ \case
-              PJust hash -> ptraceIfTrue "Found matching hash!" $ hash #== ph
-              PNothing -> pcon PFalse
-      -- Filter txInputs with isPoolAddress, applied over the "address" field of "txInfoResolved".
-      -- The result must produce a singular match.
-      PJust _ <-
-        pmatchC $
-          psingleMatch
-            # plam
-              ( \x ->
-                  let resolved = pfromData $ pfield @"resolved" # pfromData x
-                   in isPoolAddress #$ pfromData $ pfield @"address" # resolved
-              )
-            # txInputs
-      pure $ pconstant ()
-    PCancelOrder _ -> do
-      ptraceC "CancelOrder case"
-      let sender = pfromData $ pfield @"sender" # pdatm
-          signatories = pfromData $ hrecField @"signatories" info
+    txInfo :: V2.TxInfo
+    txInfo = V2.scriptContextTxInfo ctx
 
-      -- The sender field in datum should have a pub key hash.
-      PJust ownerPubKeyHash <- pmatchC $ PLedger.toPubKeyHash # sender
-      pure $
-        pif
-          (pelem # pdata (pcon $ PPubKeyHash ownerPubKeyHash) # signatories)
-          (ptrace "Found pub key in signatories" $ pconstant ())
-          $ ptraceError "Pub key missing from signatories"
+    addrToPkh :: V2.Address -> V2.PubKeyHash
+    addrToPkh (V2.Address (V2.PubKeyCredential k) _) = k
+
+    validSig :: Bool
+    validSig = txSignedBy txInfo $ addrToPkh $ odSender datum
+
+    isPoolAddress :: V2.ValidatorHash -> TxOut -> Bool
+    isPoolAddress vh o = case toValidatorHash $ txOutAddress o of
+        Just vh' -> vh == vh'
+        _ -> False
+    
+    hasOnePoolInput :: Bool
+    hasOnePoolInput = case filter (isPoolAddress poolScriptHash) [txInInfoResolved i | i <- V2.txInfoInputs txInfo] of
+        [o] -> True
+        _ -> False

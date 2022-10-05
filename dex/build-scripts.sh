@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-magic="1097911063"
+magic="2"
 
 set -euo pipefail
 

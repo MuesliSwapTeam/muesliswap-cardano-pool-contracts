@@ -1,6 +1,6 @@
 Cabal-Version:       3.0
 Name:                muesliswappools-core
-Version:             1.0
+Version:             1.2
 Copyright:           © 2021 Minswap Labs
 License:             GPL-3.0-only
 License-files:       LICENSE
@@ -45,13 +45,6 @@ library
     MuesliSwapPools.BatchOrder.OnChain,
     MuesliSwapPools.BatchOrder.Types,
     MuesliSwapPools.Utils.OnChainUtils,
-    MuesliSwapPools.Spooky.Typed,
-    MuesliSwapPools.Spooky.Untyped,
-    MuesliSwapPools.Spooky.TypedSpookyContexts,
-    MuesliSwapPools.Spooky.UntypedSpookyContexts,
-    MuesliSwapPools.Plutarch.Utils,
-    MuesliSwapPools.Plutarch.Utils.Cont,
-    MuesliSwapPools.Plutarch.Ledger
   build-depends:
     , aeson
     , base ^>= 4.14.1.0
@@ -74,12 +67,13 @@ library
     , regex-tdfa ^>= 1.3.1.0
     , req ^>= 3.9.0
     , serialise
-    , plutarch
     , template-haskell >= 2.16.0.0
     , text
     , uuid
-    , plutonomy
     , generics-sop
+    , plutus-script-utils
+    , hashable
+    , deepseq
 
 executable muesliswappools
   import: c

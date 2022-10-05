@@ -6,17 +6,15 @@ module MuesliSwapPools.ConstantProductPoolNFT.Utils
   )
 where
 
-import Ledger (AssetClass, Value)
 import MuesliSwapPools.Types.Coin
-import Plutus.V1.Ledger.Api (Value (Value))
-import Plutus.V1.Ledger.Value (CurrencySymbol)
+import qualified Plutus.V2.Ledger.Api as V2
 import qualified PlutusTx.AssocMap as Map
 import PlutusTx.Prelude
 
 {-# INLINEABLE poolNFTOf #-}
-poolNFTOf :: Value -> CurrencySymbol -> AssetClass
-poolNFTOf (Value v) nftSymbol = case Map.lookup nftSymbol v of
+poolNFTOf :: V2.Value -> V2.CurrencySymbol -> (V2.CurrencySymbol, V2.TokenName)
+poolNFTOf (V2.Value v) nftSymbol = case Map.lookup nftSymbol v of
   Nothing -> error ()
   Just i -> case [o | o@(_, am) <- Map.toList i, am == 1] of
-    [(tn, _)] -> assetClass nftSymbol tn
+    [(tn, _)] -> (nftSymbol, tn)
     _ -> error ()

@@ -4,23 +4,17 @@
 module MuesliSwapPools.Utils.OnChainUtils
   ( assertPoolValue,
     mustFindScriptDatum,
-    mustFindScriptDatum',
     integerToBS,
     bsToInteger,
-    encodeHex,
-    integerToBase256,
-    base256ToInteger,
     licenseDeadline,
-    licenseDeadlineSC,
+    hasOutDatum
   )
 where
 
-import qualified MuesliSwapPools.Spooky.TypedSpookyContexts as SC
 import MuesliSwapPools.Types.Coin (adaCoin, assetClassValueOf)
-import Plutus.V1.Ledger.Api
-import Plutus.V1.Ledger.Contexts (TxInfo, TxOut, findDatum)
+import qualified Plutus.V2.Ledger.Api as V2
+import Plutus.V2.Ledger.Contexts (TxInfo, TxOut, findDatum)
 import Plutus.V1.Ledger.Tx (txOutDatum)
-import Plutus.V1.Ledger.Value
 import qualified PlutusTx
 import PlutusTx.IsData.Class (UnsafeFromData)
 import PlutusTx.Prelude
@@ -33,9 +27,9 @@ zeroAsciiCode :: Integer
 zeroAsciiCode = 48
 
 {-# INLINEABLE assertPoolValue #-}
-assertPoolValue :: AssetClass -> AssetClass -> AssetClass -> Value -> Bool
+assertPoolValue :: (V2.CurrencySymbol, V2.TokenName) -> (V2.CurrencySymbol, V2.TokenName) -> (V2.CurrencySymbol, V2.TokenName) -> V2.Value -> Bool
 assertPoolValue coinA coinB lpCoin v =
-  let valueLength = length $ flattenValue v
+  let valueLength = length $ flatten' v
       hasLPCoin = assetClassValueOf v lpCoin > 0
       hasOneSideADA = coinA == adaCoin || coinB == adaCoin
    in if hasLPCoin && hasOneSideADA
@@ -47,20 +41,24 @@ assertPoolValue coinA coinB lpCoin v =
               if hasLPCoin && not hasOneSideADA
                 then valueLength == 6
                 else valueLength == 5
+  where
+    flatten' :: V2.Value -> [(V2.CurrencySymbol, V2.TokenName, Integer)]
+    flatten' v = goOuter [] (Map.toList $ V2.getValue v)
+      where
+        goOuter acc []             = acc
+        goOuter acc ((cs, m) : tl) = goOuter (goInner cs acc (Map.toList m)) tl
+
+        goInner _ acc [] = acc
+        goInner cs acc ((tn, a) : tl)
+            | a /= 0    = goInner cs ((cs, tn, a) : acc) tl
+            | otherwise = goInner cs acc tl
 
 {-# INLINEABLE mustFindScriptDatum #-}
 mustFindScriptDatum :: (UnsafeFromData d) => TxOut -> TxInfo -> d
-mustFindScriptDatum o info = case txOutDatum o of
-  Just dh -> case findDatum dh info of
-    Just (Datum dat) -> PlutusTx.unsafeFromBuiltinData dat
-    _ -> error ()
-  _ -> error ()
-
-{-# INLINEABLE mustFindScriptDatum' #-}
-mustFindScriptDatum' :: (UnsafeFromData d) => SC.TxOut -> SC.TxInfo -> d
-mustFindScriptDatum' o info = case SC.txOutDatumHash o of
-  Just dh -> case SC.findDatum dh info of
-    Just (Datum dat) -> PlutusTx.unsafeFromBuiltinData dat
+mustFindScriptDatum o info = case V2.txOutDatum o of
+  V2.OutputDatum (V2.Datum dat) -> PlutusTx.unsafeFromBuiltinData dat
+  V2.OutputDatumHash dh -> case findDatum dh info of
+    Just (V2.Datum dat) -> PlutusTx.unsafeFromBuiltinData dat
     _ -> error ()
   _ -> error ()
 
@@ -87,73 +85,19 @@ bsToInteger input = go 0 0
       | idx == len = acc
       | otherwise = go (idx + 1) (acc * 256 + indexByteString input idx)
 
--- Convert from a byte string to its hex (base16) representation. Example: [2, 14, 255] => "020eff"
-{-# INLINEABLE encodeHex #-}
-encodeHex :: BuiltinByteString -> BuiltinByteString
-encodeHex input = go 0
-  where
-    len = lengthOfByteString input
-
-    go :: Integer -> BuiltinByteString
-    go i
-      | i == len = emptyByteString
-      | otherwise =
-        consByteString (toChar $ byte `quotient` 16) $
-          consByteString (toChar $ byte `remainder` 16) (go $ i + 1)
-      where
-        byte = indexByteString input i
-
-        toChar :: Integer -> Integer
-        toChar x
-          -- 48 is ASCII code for '0'
-          | x < 10 = x + 48
-          -- 97 is ASCII code for 'a'
-          -- x - 10 + 97 = x + 87
-          | otherwise = x + 87
-
--- Only works with positive integer
-{-# INLINEABLE integerToBase256 #-}
-integerToBase256 :: Integer -> BuiltinByteString
-integerToBase256 x
-  | x < 0 = error ()
-  | x < 256 = toByte x
-  | otherwise = integerToBase256 (x `quotient` 256) <> toByte (x `remainder` 256)
-  where
-    toByte :: Integer -> BuiltinByteString
-    toByte y = consByteString y emptyByteString
-
--- Only works with positive integer
-{-# INLINEABLE base256ToInteger #-}
-base256ToInteger :: BuiltinByteString -> Integer
-base256ToInteger input = go 0 0
-  where
-    len = lengthOfByteString input
-
-    go :: Integer -> Integer -> Integer
-    go idx acc
-      | idx == len = acc
-      | otherwise = go (idx + 1) (acc * 256 + byte)
-      where
-        byte = indexByteString input idx
-
 {-# INLINEABLE licenseDeadline #-}
-licenseDeadline ::  TxInInfo -> CurrencySymbol -> Integer
+licenseDeadline ::  V2.TxInInfo -> V2.CurrencySymbol -> Integer
 licenseDeadline licenseInput licenseSymbol =
-  let (Value mp) = txOutValue $ txInInfoResolved licenseInput
-      (TokenName license) = case Map.lookup licenseSymbol mp of
+  let (V2.Value mp) = V2.txOutValue $ V2.txInInfoResolved licenseInput
+      (V2.TokenName license) = case Map.lookup licenseSymbol mp of
         Just i -> case Map.toList i of
           [(tn, _)] -> tn
           _ -> error ()
         _ -> error ()
     in bsToInteger license
 
-{-# INLINEABLE licenseDeadlineSC #-}
-licenseDeadlineSC ::  SC.TxInInfo -> CurrencySymbol -> Integer
-licenseDeadlineSC licenseInput licenseSymbol =
-  let (Value mp) = SC.txOutValue $ SC.txInInfoResolved licenseInput
-      (TokenName license) = case Map.lookup licenseSymbol mp of
-        Just i -> case Map.toList i of
-          [(tn, _)] -> tn
-          _ -> error ()
-        _ -> error ()
-    in bsToInteger license
+{-# INLINEABLE hasOutDatum #-}
+hasOutDatum ::  V2.TxOut -> Bool
+hasOutDatum o = case V2.txOutDatum o of
+  V2.NoOutputDatum -> False
+  _ -> True

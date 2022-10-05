@@ -4,16 +4,19 @@
 module MuesliSwapPools.ConstantProductPool.Utils
   ( calculateInitialLiquidity,
     minimumLiquidity,
-    calculateProfitSharing,
+    calculateSwapAmount,
     calSqrt,
     calculateDepositAmount,
     hasNoInputFromBatcher,
     hasSwapperLicense,
+    findOwnInputV2,
+    getAmountOut,
+    validOutDatum
   )
 where
 
-import Ledger
-import Plutus.V1.Ledger.Api (Value (Value))
+import qualified Plutus.V2.Ledger.Api as V2
+import Plutus.V2.Ledger.Contexts (TxInfo, TxInInfo, txOutDatum, txInInfoResolved, findDatum)
 import MuesliSwapPools.BatchOrder.Types
   ( OrderDatum,
     odScriptVersion,
@@ -51,38 +54,8 @@ calculateInitialLiquidity outA outB =
         then sqrt + 1
         else sqrt
 
--- Calculate liquidity amount which will be minted for profit sharing
--- The protocol will collect 0.05% of trading fee
--- Refer: https://uniswap.org/whitepaper.pdf (2.4 Protocol fee)
-{-# INLINEABLE calculateProfitSharing #-}
-calculateProfitSharing ::
-  Integer ->
-  Integer ->
-  Integer ->
-  Integer ->
-  Integer ->
-  Integer
-calculateProfitSharing rootKLast reserveA reserveB totalLiquidity extraFeeDenom =
-  if rootKLast <= 0
-    then 0
-    else
-      let rootK = calSqrt (reserveA * reserveB)
-       in if rootK > rootKLast
-            then
-              let numerator = totalLiquidity * (rootK - rootKLast)
-                  denominator = (rootK * (extraFeeDenom - 1)) + rootKLast
-                  liquidity = numerator `divide` denominator
-               in if liquidity > 0 then liquidity else 0
-            else 0
-
 {-# INLINEABLE calculateDepositAmount #-}
-calculateDepositAmount ::
-  Integer ->
-  Integer ->
-  Integer ->
-  Integer ->
-  Integer ->
-  Maybe (Integer, Integer, Integer)
+calculateDepositAmount :: Integer -> Integer -> Integer -> Integer -> Integer -> Maybe (Integer, Integer, Integer)
 calculateDepositAmount
   deltaA
   deltaB
@@ -101,16 +74,11 @@ calculateDepositAmount
           else Nothing
 
 {-# INLINEABLE hasNoInputFromBatcher #-}
-hasNoInputFromBatcher ::
-  [TxInInfo] ->
-  TxInfo ->
-  Bool
+hasNoInputFromBatcher :: [TxInInfo] -> TxInfo -> Bool
 hasNoInputFromBatcher txIns txInfo =
-  let isBatcherInput txIn = case txOutDatumHash $ txInInfoResolved txIn of
-        Just dh -> case findDatum dh txInfo of
-          Just (Datum d) -> case PlutusTx.fromBuiltinData d of
-            Just b -> odScriptVersion b == scriptVersion
-            _ -> False
+  let isBatcherInput txIn = case txOutDatum $ txInInfoResolved txIn of
+        V2.OutputDatum (V2.Datum d) -> case PlutusTx.fromBuiltinData d of
+          Just b -> odScriptVersion b == scriptVersion
           _ -> False
         _ -> False
    in case [i | i <- txIns, isBatcherInput i] of
@@ -118,7 +86,45 @@ hasNoInputFromBatcher txIns txInfo =
         _ -> False
 
 {-# INLINEABLE hasSwapperLicense #-}
-hasSwapperLicense :: Value -> CurrencySymbol -> Bool
-hasSwapperLicense (Value v) licenseSymbol = case Map.lookup licenseSymbol v of
+hasSwapperLicense :: V2.Value -> V2.CurrencySymbol -> Bool
+hasSwapperLicense (V2.Value v) licenseSymbol = case Map.lookup licenseSymbol v of
   Nothing -> False
   Just _ -> True
+
+findOwnInputV2 :: V2.ScriptContext -> Maybe V2.TxInInfo
+findOwnInputV2 V2.ScriptContext{V2.scriptContextTxInfo=V2.TxInfo{V2.txInfoInputs},
+             V2.scriptContextPurpose=V2.Spending txOutRef} = go txInfoInputs
+    where
+        go [] = Nothing
+        go (i@V2.TxInInfo{V2.txInInfoOutRef} : rest) = if txInInfoOutRef == txOutRef
+                                                 then Just i
+                                                 else go rest
+findOwnInputV2 _ = Nothing
+
+-- Calculate which amount will be swapped to supply enough amount for depositing
+-- Refer: https://blog.alphafinance.io/onesideduniswap/
+{-# INLINEABLE calculateSwapAmount #-}
+calculateSwapAmount :: Integer -> Integer -> Integer -> Integer
+calculateSwapAmount reserve delta swapFee =
+  let reserve' = (20000 - swapFee) * reserve
+      numerator =
+        calSqrt
+          (reserve' * reserve' + 4 * (10000 - swapFee) * 10000 * delta * reserve)
+          - ((20000 - swapFee) * reserve)
+      denominator = 2 * (10000 - swapFee)
+   in numerator `divide` denominator
+
+{-# INLINEABLE getAmountOut #-}
+getAmountOut :: Integer -> Integer -> Integer -> Integer -> Integer
+getAmountOut reserveA reserveB inA swapFee =
+  let inAWithFee = inA * (10000 - swapFee)
+      numerator = inAWithFee * reserveB
+      denominator = reserveA * 10000 + inAWithFee
+      outB = numerator `divide` denominator
+   in outB
+
+{-# INLINEABLE validOutDatum #-}
+validOutDatum :: V2.OutputDatum -> Maybe V2.DatumHash -> Bool
+validOutDatum _ Nothing = True
+validOutDatum (V2.OutputDatumHash dh) (Just dh') = dh == dh'
+validOutDatum _ _ = False
